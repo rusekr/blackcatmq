@@ -4,7 +4,7 @@ var util = require('util');
 var fs = require('fs');
 var readline = require('readline');
 
-var config = JSON.parse(fs.readFileSync('./blackcatmq.conf', 'utf8'));
+var config = JSON.parse(fs.readFileSync('./blackcatmq.conf.template', 'utf8'));
 
 var rl = readline.createInterface({
   input: process.stdin,

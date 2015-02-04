@@ -1,3 +1,7 @@
+blackcatmq.conf
+*.pem
+*.key
+*.crt
 *.log
 /dump/*.dat
 /node_modules
