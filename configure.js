@@ -36,34 +36,21 @@ tasks = [
     },
     
     function(next) {
-        rl.question(util.format("serverType {%s} [net,tls] :", config.serverType), function(answer) {    
+        rl.question(util.format("serverType {%s} [http,https] :", config.serverType), function(answer) {
             config.serverType = answer !== '' ? answer : config.serverType;
             switch (config.serverType) {
-                case 'net':
-                    config.serverOptions = {"allowHalfOpen":true};
+                case 'http':
                     break;
-                case 'tls':
+                case 'https':
                     config.serverOptions = { "key": "", "cert": "", "ca": ""};
                     break;
             }
             next();
         });
     },
-
-    function(next) {
-        if (config.serverType === 'net') {
-            rl.question(util.format("serverOptions.allowHalfOpen {%s} :", config.serverOptions.allowHalfOpen), function(answer) {    
-                config.serverOptions.allowHalfOpen = answer !== '' ? answer : config.serverOptions.allowHalfOpen;  
-                next();
-            });
-        } else {
-            next();
-        }
-    },
-    
     
     function(next) {
-        if (config.serverType === 'tls') {
+        if (config.serverType === 'https') {
             rl.question("serverOptions.key  :", function(answer) {    
                 config.serverOptions.key = answer;
                 next();
@@ -74,7 +61,7 @@ tasks = [
     },
 
     function(next) {
-        if (config.serverType === 'tls') {
+        if (config.serverType === 'https') {
             rl.question("serverOptions.cert  :", function(answer) {    
                 config.serverOptions.cert = answer;
                 next();
@@ -86,7 +73,7 @@ tasks = [
     
 
     function(next) {
-        if (config.serverType === 'tls') {
+        if (config.serverType === 'https') {
             rl.question("serverOptions.ca  :", function(answer) {    
                 config.serverOptions.ca = answer;
                 next();
@@ -98,7 +85,7 @@ tasks = [
 
     
     function(next) {
-        rl.question(util.format("authType {%s} [none, ldap] :", config.authType), function(answer) {    
+        rl.question(util.format("authType {%s} [none, ldap, ephemeral] :", config.authType), function(answer) {    
             config.authType = answer !== '' ? answer : config.authType;
             if (config.authType === 'ldap' && !config.authOptions) {
                 config.authOptions = {
@@ -108,6 +95,10 @@ tasks = [
                     "searchBase":"ou=users,o=example.com",
                     "searchFilter":"(uid={{username}})",
                     "cache":true
+                };
+            } else if (config.authType === 'ephemeral' && !config.authOptions) {
+                config.authOptions = {
+                    "secret":"1234567890"
                 };
             } else {
                 delete config.authOptions;
@@ -120,6 +111,11 @@ tasks = [
         if (config.authType === 'ldap') {
             rl.question(util.format("authOptions.url {%s}  :", config.authOptions.url), function(answer) {    
                 config.authOptions.url = answer !== '' ? answer : config.authOptions.url;        
+                next();
+            });
+        } else if (config.authType === 'ephemeral') {
+            rl.question(util.format("authOptions.secret {%s}  :", config.authOptions.secret), function(answer) {
+                config.authOptions.secret = answer !== '' ? answer : config.authOptions.secret;
                 next();
             });
         } else {

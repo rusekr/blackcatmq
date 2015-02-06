@@ -16,10 +16,13 @@ var fs = require('fs');
 var stomp = require('./lib/stomp.js');
 
 
-function sender(socket, data) {
+function sender(connection, data) {
     if (data) {
-        if (socket && socket.writable) {
-            socket.write(data.toString());
+        if (connection && connection.connected) {
+            connection.send(data.toString());
+            if (data.command === 'ERROR') {
+                connection.close();
+            }
         }
     }
 }
@@ -30,83 +33,129 @@ function getId() {
 
 var BlackCatMQ = function (config) {
     var self = this;
-    
-    if (self instanceof BlackCatMQ) {
-        self.identifier = 'BlackCatMQ';
 
-        self.port = config.port || 61613;
-        self.host = config.host || '0.0.0.0';
-        self.interval = config.interval || 50000;
-        self.serverType = config.serverType || 'net';
-        self.authType = config.authType || 'none';
-        self.serverOptions = config.serverOptions || { 'allowHalfOpen': true };
+    self.identifier = 'BlackCatMQ-teligent';
 
-        self.sockets = {};
-        self.subscribes = {};
-        
-        self.messages = { frame: {}, queue: [] };
-        self.ack_list = [];
-        
-        self.transactions = {};
-            
-        self.auth = null;
-        switch (self.authType.toLowerCase()) {
-            case 'ldap':
-                self.auth = new require('ldapauth')(config.authOprions);
-                break;                
+    self.port = config.port || 8443;
+    self.host = [].concat(config.host || '0.0.0.0');
+    self.interval = config.interval || 50000;
+    self.serverType = config.serverType || 'https';
+    self.authType = config.authType || 'none';
+    self.serverOptions = config.serverOptions || {};
+    self.serverOptions.key = self.serverType === 'https' ? fs.readFileSync(self.serverOptions.key) : '';
+    self.serverOptions.cert = self.serverType === 'https' ? fs.readFileSync(self.serverOptions.cert) : '';
+
+    self.connections = {};
+    self.subscribes = {};
+
+    self.messages = { frame: {}, queue: [] };
+    self.ack_list = [];
+
+    self.transactions = {};
+
+    self.auth = null;
+    switch (self.authType.toLowerCase()) {
+        case 'ldap':
+            self.auth = new require('ldapauth')(config.authOprions);
+            break;
+        case 'ephemeral':
+            self.auth = config.authOptions;
+            break;
+    }
+
+    self.server = require(self.serverType).createServer(self.serverOptions, function(request, response) {
+        console.log((new Date()), 'got http request');
+        var message = 'Websocket only.';
+        response.writeHead(200, {
+          'Content-Length': message.length,
+          'Content-Type': 'text/plain'
+        });
+        response.end(message);
+    });
+
+    // Port binding
+    self.host.forEach(function (serverIP) {
+        self.server.listen(self.port, serverIP, function() {
+            console.log((new Date()) + "Server is listening on ip:", serverIP, 'and port:', self.port);
+        });
+    });
+          // Websocket server creation over http server
+    self.wsServer = new (require('websocket').server)({
+        httpServer: self.server,
+        autoAcceptConnections: false
+    });
+
+    // Web socket connection request from client handling
+    self.wsServer.on('request', function(request) {
+        console.log((new Date()), 'got websocket request');
+
+        var acceptedProtocols = ['v10.stomp']; //TODO: to config
+        var requestedProtocols = request.requestedProtocols;
+        var selectedProtocol = null;
+        if (requestedProtocols.length) {
+            requestedProtocols.forEach(function (protocol) {
+                if (acceptedProtocols.indexOf(protocol) !== -1) {
+                    selectedProtocol = protocol;
+                    return;
+                }
+            });
         }
-        
-        self.server = require(self.serverType).createServer(self.serverOptions, function(socket) {            
-            socket.setEncoding('utf8');
-            socket.setKeepAlive(true);
-            
-            var remoteAddress = socket.address();
-            util.log(util.format('server is connected to %s:%s', remoteAddress.address, remoteAddress.port));
-            
-            var data = '';
-            socket.on('data', function(chunk) {
-                
+
+        if (selectedProtocol !== null) {
+            var connection = request.accept(selectedProtocol, request.origin);
+        } else {
+            request.reject(404 /*?*/, 'not accepted protocol(s)');
+            throw new Error('not accepted protocol(s)');
+        }
+
+        console.log((new Date()), 'accepted websocket request');
+
+        var remoteAddress = connection.remoteAddress;
+        util.log(util.format('client is connected from %s', remoteAddress));
+
+        var data = '';
+        connection.on('message', function(message) {
+            util.log(util.format('got message %s of type %s from %s', message.utf8Data, message.type, remoteAddress));
+            if (message.type === 'utf8') {
+                var chunk = message.utf8Data;
                 if (DEBUG) {
                     if (!self.dumpFileName) {
                         self.dumpFileName = new Date().toString() + '.dat';
                     }
                     fs.appendFileSync('./dump/' + self.dumpFileName, chunk, encoding='utf8');
                 }
-                
-                data += chunk.toString();
-                
+
+                data += chunk;
+
                 var frames = data.split(stomp.DELIMETER);
-                                
+
                 if (frames.length > 1) {
-                    data = frames.pop();                
+                    data = frames.pop();
                     frames.forEach(function(_frame) {
                         var frame = stomp.Frame(_frame);
-                        try {                            
+                        try {
                             if (DEBUG) {
                                 util.log(util.inspect(frame));
                             }
-                            
+
                             if (self[frame.command.toLowerCase()] && typeof self[frame.command.toLowerCase()] === 'function') {
-                                sender(socket, self[frame.command.toLowerCase()].call(self, socket, frame));
+                                sender(connection, self[frame.command.toLowerCase()].call(self, connection, frame));
                             } else {
-                                sender(socket, stomp.ServerFrame.ERROR('invalid parameters','command ' + frame.command + ' is not supported'));
+                                sender(connection, stomp.ServerFrame.ERROR('invalid parameters','command ' + frame.command + ' is not supported'));
                             }
                         } catch (ex) {
-                            sender(socket, stomp.ServerFrame.ERROR(ex, ex.stack));
+                            sender(connection, stomp.ServerFrame.ERROR(ex, ex.stack));
                         }
                     });
-                }   
-                
-            });
-            
-            socket.on('end', function() {
-                util.log(util.format('server is disconnected from %s:%s', remoteAddress.address, remoteAddress.port));
-                self.disconnect(socket, null);
-            });
-        });        
-    } else {
-        return new BlackCatMQ(config);
-    }
+                }
+            }
+        });
+
+        connection.on('close', function() {
+            util.log(util.format('client is disconnected from %s', remoteAddress));
+            self.disconnect(connection, null);
+        });
+    });
 }
 
 /*
@@ -133,26 +182,33 @@ BlackCatMQ.prototype.start = function(callback) {
 BlackCatMQ.prototype.stop = function(callback) {
     var self = this;
     
-    self.server.close(function() {
-        util.log('server is stopped');
-        
-        clearInterval(self.timerID);
-        
-        if (callback && typeof callback === 'function') {
-            return callback();
-        }    
-    });    
+    if (self.server._handle) {
+        self.server.close(function() {
+            util.log('server is stopped');
+
+            clearInterval(self.timerID);
+
+            if (callback && typeof callback === 'function') {
+                return callback();
+            }
+        });
+    } else {
+        util.log('server is already stopped');
+    }
 }
 
 /*
  STOMP command  -> connect
 */
-BlackCatMQ.prototype.connect = function(socket, frame) {
+BlackCatMQ.prototype.connect = function(connection, frame) {
     var self = this;
-    
+
+    util.log('invoked connect method', self.authType);
+
     if (self.auth) {
         
-        var login = frame.header['login']
+        var login = frame.header['login'];
+        console.log(login);
         if (!login) {
             return stomp.ServerFrame.ERROR('connect error','login is required');    
         }
@@ -161,22 +217,40 @@ BlackCatMQ.prototype.connect = function(socket, frame) {
             return stomp.ServerFrame.ERROR('connect error','passcode is required');    
         }
         
-        self.auth.authenticate(login, passcode, function(err, user) {
-            if (err) {
-                return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');    
+        if (self.authType === 'ldap') {
+          self.auth.authenticate(login, passcode, function(err, user) {
+              if (err) {
+                  return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');
+              }
+
+              var sessionID = getId();
+              connection.sessionID = sessionID;
+              self.connections[sessionID] = connection;
+
+              return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
+          });
+        } else if (self.authType === 'ephemeral') {
+            var nowDate = (new Date()).getTime();
+            var expectedPassword = require('crypto').createHmac('sha1', self.auth.secret).update(login).digest('base64');
+            var expireDate = login.split(':')[0];
+
+            console.log(expectedPassword, passcode, expireDate, nowDate, login, self.auth.secret);
+
+            if(expectedPassword != passcode || parseInt(expireDate)*1000 < nowDate) {
+                return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');
             }
-            
+
             var sessionID = getId();
-            socket.sessionID = sessionID;
-            self.sockets[sessionID] = socket;
-            
-            return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);            
-        });        
+            connection.sessionID = sessionID;
+            self.connections[sessionID] = connection;
+
+            return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
+        }
     }
         
     var sessionID = getId();
-    socket.sessionID = sessionID;
-    self.sockets[sessionID] = socket;
+    connection.sessionID = sessionID;
+    self.connections[sessionID] = connection;
     
     return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
 }
@@ -184,14 +258,14 @@ BlackCatMQ.prototype.connect = function(socket, frame) {
 /*
  STOMP command -> subscribe
 */
-BlackCatMQ.prototype.subscribe = function(socket, frame) {
+BlackCatMQ.prototype.subscribe = function(connection, frame) {
     var self = this;
     
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
     
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
     
@@ -205,27 +279,27 @@ BlackCatMQ.prototype.subscribe = function(socket, frame) {
     }
         
     if (frame.header['ack'] && frame.header['ack'] === 'client') {
-        self.ack_list.push(socket.sessionID);
+        self.ack_list.push(connection.sessionID);
     }
     
     if (self.subscribes[destination]) {
-        self.subscribes[destination].push(socket.sessionID);    
+        self.subscribes[destination].push(connection.sessionID);
     } else {
-        self.subscribes[destination] = [socket.sessionID];   
+        self.subscribes[destination] = [connection.sessionID];
     }
 }
 
 /*
  STOMP command -> unsubsctibe
 */
-BlackCatMQ.prototype.unsubscribe = function(socket, frame) {
+BlackCatMQ.prototype.unsubscribe = function(connection, frame) {
     var self = this;
     
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
        
@@ -239,7 +313,7 @@ BlackCatMQ.prototype.unsubscribe = function(socket, frame) {
     }
     
     if (self.subscribes[destination]) {
-        var pos = self.subscribes[destination].indexOf(socket.sessionID);
+        var pos = self.subscribes[destination].indexOf(connection.sessionID);
         if (pos >= 0) {
             self.subscribes[destination].splice(pos, 1);   
         }        
@@ -249,14 +323,14 @@ BlackCatMQ.prototype.unsubscribe = function(socket, frame) {
 /*
  STOMP command -> send
 */
-BlackCatMQ.prototype.send = function(socket, frame) {
+BlackCatMQ.prototype.send = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
    
@@ -286,10 +360,10 @@ BlackCatMQ.prototype.send = function(socket, frame) {
                 self.messages.frame[messageID] = frame;
                 self.messages.queue.push(messageID);
             }            
-            sender(self.sockets[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));            
+            sender(self.connections[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));
         } else {
             self.subscribes[destination].forEach(function(session) {
-                sender(self.sockets[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));                
+                sender(self.connections[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));
             });    
         }
     }
@@ -298,14 +372,14 @@ BlackCatMQ.prototype.send = function(socket, frame) {
 /*
  STOMP command -> ack
 */
-BlackCatMQ.prototype.ack = function(socket, frame) {
+BlackCatMQ.prototype.ack = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
     
@@ -331,27 +405,27 @@ BlackCatMQ.prototype.ack = function(socket, frame) {
 /*
  STOMP command -> disconnect
 */
-BlackCatMQ.prototype.disconnect = function(socket, frame) {
+BlackCatMQ.prototype.disconnect = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
     
-    delete self.sockets[socket.sessionID];
+    delete self.connections[connection.sessionID];
     
     for (var destination in self.subscribes) {
-        var pos = self.subscribes[destination].indexOf(socket.sessionID);
+        var pos = self.subscribes[destination].indexOf(connection.sessionID);
         if (pos >= 0) {
             self.subscribes[destination].splice(pos, 1);   
         }
     }
     
-    var pos = self.ack_list.indexOf(socket.sessionID);
+    var pos = self.ack_list.indexOf(connection.sessionID);
     if (pos >= 0) {
         self.ack_list.splice(pos, 1);
     }
@@ -360,14 +434,14 @@ BlackCatMQ.prototype.disconnect = function(socket, frame) {
 /*
  STOMP command -> begin
 */
-BlackCatMQ.prototype.begin = function(socket, frame) {
+BlackCatMQ.prototype.begin = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }    
     
@@ -386,14 +460,14 @@ BlackCatMQ.prototype.begin = function(socket, frame) {
 /*
  STOMP command -> commit
 */
-BlackCatMQ.prototype.commit = function(socket, frame) {
+BlackCatMQ.prototype.commit = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
       
@@ -412,14 +486,14 @@ BlackCatMQ.prototype.commit = function(socket, frame) {
 /*
  STOMP command -> abort
 */
-BlackCatMQ.prototype.abort = function(socket, frame) {
+BlackCatMQ.prototype.abort = function(connection, frame) {
     var self = this;
 
-    if (!socket.sessionID) {
+    if (!connection.sessionID) {
         return stomp.ServerFrame.ERROR('connect error','you need connect before');
     }
 
-    if (self.sockets[socket.sessionID] !== socket) {
+    if (self.connections[connection.sessionID] !== connection) {
         return stomp.ServerFrame.ERROR('connect error','session is not correct');
     }
         
@@ -471,12 +545,6 @@ if (require.main === module) {
             if (server) {
                 server.stop();
             }
-        });
-        
-        process.once('exit', function() {
-            if (server) {
-                server.stop();
-            }        
         });
         
         process.once('SIGINT', function() {
