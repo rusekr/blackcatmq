@@ -4,4 +4,4 @@ blackcatmq.conf
 *.crt
 *.log
 /dump/*.dat
-/node_modules
+**/node_modules
