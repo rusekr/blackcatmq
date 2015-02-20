@@ -6,6 +6,8 @@
 
  changes:
     9 October 2013 Chris Flook - Expose blackcatmq for use as a module
+
+    6 February 2015 Sergey Krasnikov - Websocket server, ephemeral authorization support
 */
 
 var DEBUG = false;
@@ -46,10 +48,8 @@ var BlackCatMQ = function (config) {
     self.serverOptions.cert = self.serverType === 'https' ? fs.readFileSync(self.serverOptions.cert) : '';
 
     self.connections = {};
-    self.subscribes = {};
 
     self.messages = { frame: {}, queue: [] };
-    self.ack_list = [];
 
     self.transactions = {};
 
@@ -89,7 +89,7 @@ var BlackCatMQ = function (config) {
     self.wsServer.on('request', function(request) {
         console.log((new Date()), 'got websocket request');
 
-        var acceptedProtocols = ['v10.stomp']; //TODO: to config
+        var acceptedProtocols = [/*'v11.stomp',*/ 'v10.stomp']; //TODO: v11.stomp support - nack, heartbeat, subscriptions separate by id
         var requestedProtocols = request.requestedProtocols;
         var selectedProtocol = null;
         if (requestedProtocols.length) {
@@ -203,12 +203,14 @@ BlackCatMQ.prototype.stop = function(callback) {
 BlackCatMQ.prototype.connect = function(connection, frame) {
     var self = this;
 
-    util.log('invoked connect method', self.authType);
+    var sessionID = getId();
+    connection.sessionID = sessionID;
+    connection.subscriptions = {};
+    connection.ack_list = [];
 
     if (self.auth) {
         
         var login = frame.header['login'];
-        console.log(login);
         if (!login) {
             return stomp.ServerFrame.ERROR('connect error','login is required');    
         }
@@ -223,10 +225,7 @@ BlackCatMQ.prototype.connect = function(connection, frame) {
                   return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');
               }
 
-              var sessionID = getId();
-              connection.sessionID = sessionID;
               self.connections[sessionID] = connection;
-
               return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
           });
         } else if (self.authType === 'ephemeral') {
@@ -240,20 +239,19 @@ BlackCatMQ.prototype.connect = function(connection, frame) {
                 return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');
             }
 
-            var sessionID = getId();
-            connection.sessionID = sessionID;
             self.connections[sessionID] = connection;
-
             return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
         }
     }
-        
-    var sessionID = getId();
-    connection.sessionID = sessionID;
+
     self.connections[sessionID] = connection;
-    
     return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
 }
+
+/*
+ STOMP command  -> stomp
+*/
+BlackCatMQ.prototype.stomp = BlackCatMQ.prototype.connect;
 
 /*
  STOMP command -> subscribe
@@ -277,15 +275,22 @@ BlackCatMQ.prototype.subscribe = function(connection, frame) {
     if (!destination) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no destination argument');
     }
-        
-    if (frame.header['ack'] && frame.header['ack'] === 'client') {
-        self.ack_list.push(connection.sessionID);
+
+    var id = frame.header['id'];
+    // v1.1 id is required
+    if (!id) {
+        return stomp.ServerFrame.ERROR('invalid parameters','there is no id argument');
     }
-    
-    if (self.subscribes[destination]) {
-        self.subscribes[destination].push(connection.sessionID);
-    } else {
-        self.subscribes[destination] = [connection.sessionID];
+
+    if (!Array.isArray(connection.subscriptions[destination])) {
+      connection.subscriptions[destination] = [];
+    }
+
+    connection.subscriptions[destination].push(id);
+
+    // TODO: v1.1 client-individual ack type
+    if (frame.header['ack'] && frame.header['ack'] === 'client') {
+        connection.ack_list.push(id);
     }
 }
 
@@ -306,17 +311,22 @@ BlackCatMQ.prototype.unsubscribe = function(connection, frame) {
     if (!frame.header) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
+
+    var id = frame.header['id'];
+    if (!id) {
+        return stomp.ServerFrame.ERROR('invalid parameters','there is no id argument');
+    }
     
     var destination = frame.header['destination'];
     if (!destination) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no destination argument');
     }
     
-    if (self.subscribes[destination]) {
-        var pos = self.subscribes[destination].indexOf(connection.sessionID);
+    if (connection.subscriptions[destination]) {
+        var pos = connection.subscriptions[destination].indexOf(connection.sessionID);
         if (pos >= 0) {
-            self.subscribes[destination].splice(pos, 1);   
-        }        
+            connection.subscriptions[destination].splice(pos, 1);
+        }
     }
 }
 
@@ -347,26 +357,39 @@ BlackCatMQ.prototype.send = function(connection, frame) {
     if (transaction) {
         self.transactions[transaction].push(frame);
     }
-    
-    if (self.subscribes[destination]) {
-                
-        var messageID = getId();
-                
-        if (destination.indexOf('/queue/') === 0) {
-            var session =  self.subscribes[destination].pop();
-            self.subscribes[destination].unshift(session);
-                        
-            if (self.ack_list.indexOf(session) >= 0) {
-                self.messages.frame[messageID] = frame;
-                self.messages.queue.push(messageID);
-            }            
-            sender(self.connections[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));
-        } else {
-            self.subscribes[destination].forEach(function(session) {
-                sender(self.connections[session], stomp.ServerFrame.MESSAGE(destination, messageID, frame.body));
-            });    
+
+    Object.keys(self.connections).forEach(function (sessionID) {
+
+        var inConnection = self.connections[sessionID];
+
+        if (inConnection === connection) {
+            return;
         }
-    }
+
+        if (!inConnection.subscriptions[destination]) {
+            return;
+        }
+
+        var messageID = getId();
+
+        var subscriptionID =  inConnection.subscriptions[destination].pop();
+        inConnection.subscriptions[destination].unshift(subscriptionID);
+
+        if (inConnection.ack_list.indexOf(subscriptionID) >= 0) {
+
+            self.messages.frame[messageID] = frame;
+            self.messages.queue.push(messageID);
+
+
+            sender(inConnection, stomp.ServerFrame.MESSAGE(destination, { 'message-id': messageID, 'subscription': subscriptionID }, frame.body));
+        } else {
+            inConnection.subscriptions[destination].forEach(function(subscriptionID) {
+
+                sender(inConnection, stomp.ServerFrame.MESSAGE(destination, { 'message-id': messageID, 'subscription': subscriptionID }, frame.body));
+            });
+        }
+
+    });
 }
 
 /*
@@ -417,18 +440,6 @@ BlackCatMQ.prototype.disconnect = function(connection, frame) {
     }
     
     delete self.connections[connection.sessionID];
-    
-    for (var destination in self.subscribes) {
-        var pos = self.subscribes[destination].indexOf(connection.sessionID);
-        if (pos >= 0) {
-            self.subscribes[destination].splice(pos, 1);   
-        }
-    }
-    
-    var pos = self.ack_list.indexOf(connection.sessionID);
-    if (pos >= 0) {
-        self.ack_list.splice(pos, 1);
-    }
 }
 
 /*
