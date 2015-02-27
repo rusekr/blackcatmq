@@ -362,10 +362,6 @@ BlackCatMQ.prototype.send = function(connection, frame) {
 
         var inConnection = self.connections[sessionID];
 
-        if (inConnection === connection) {
-            return;
-        }
-
         if (!inConnection.subscriptions[destination]) {
             return;
         }
