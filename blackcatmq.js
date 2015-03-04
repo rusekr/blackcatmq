@@ -279,7 +279,7 @@ BlackCatMQ.prototype.subscribe = function(connection, frame) {
     var id = frame.header['id'];
     // v1.1 id is required
     if (!id) {
-        return stomp.ServerFrame.ERROR('invalid parameters','there is no id argument');
+        id = 'destination';
     }
 
     if (!Array.isArray(connection.subscriptions[destination])) {
@@ -313,20 +313,27 @@ BlackCatMQ.prototype.unsubscribe = function(connection, frame) {
     }
 
     var id = frame.header['id'];
-    if (!id) {
-        return stomp.ServerFrame.ERROR('invalid parameters','there is no id argument');
-    }
-    
     var destination = frame.header['destination'];
-    if (!destination) {
-        return stomp.ServerFrame.ERROR('invalid parameters','there is no destination argument');
+    if (!id && !destination) {
+        return stomp.ServerFrame.ERROR('invalid parameters','there is no id or destination argument');
+    }
+    if (id && destination) {
+      return stomp.ServerFrame.ERROR('invalid parameters','there is ambiguous data: id and destination arguments');
     }
     
-    if (connection.subscriptions[destination]) {
-        var pos = connection.subscriptions[destination].indexOf(connection.sessionID);
-        if (pos >= 0) {
-            connection.subscriptions[destination].splice(pos, 1);
+    if (destination && connection.subscriptions[destination]) {
+        var subscriptionIndex = connection.subscriptions[destination].indexOf('destination');
+        if (subscriptionIndex >= 0) {
+            connection.subscriptions[destination].splice(subscriptionIndex, 1);
         }
+    } else if (id) {
+        Object.keys(connection.subscriptions).forEach(function (destination) {
+            var subscriptionIndex = connection.subscriptions[destination].indexOf(id);
+            if (subscriptionIndex != -1) {
+              connection.subscriptions[destination].splice(subscriptionIndex, 1);
+              return false;
+            }
+        });
     }
 }
 
@@ -358,6 +365,15 @@ BlackCatMQ.prototype.send = function(connection, frame) {
         self.transactions[transaction].push(frame);
     }
 
+    var send = function (inConnection, messageID, subscriptionID, destination) {
+        var headers = { 'message-id': messageID };
+        if (subscriptionID != 'destination') {
+            headers.subscription = subscriptionID;
+        }
+
+        sender(inConnection, stomp.ServerFrame.MESSAGE(destination, headers, frame.body));
+    }
+
     Object.keys(self.connections).forEach(function (sessionID) {
 
         var inConnection = self.connections[sessionID];
@@ -376,15 +392,12 @@ BlackCatMQ.prototype.send = function(connection, frame) {
             self.messages.frame[messageID] = frame;
             self.messages.queue.push(messageID);
 
-
-            sender(inConnection, stomp.ServerFrame.MESSAGE(destination, { 'message-id': messageID, 'subscription': subscriptionID }, frame.body));
+            send(inConnection, messageID, subscriptionID, destination);
         } else {
             inConnection.subscriptions[destination].forEach(function(subscriptionID) {
-
-                sender(inConnection, stomp.ServerFrame.MESSAGE(destination, { 'message-id': messageID, 'subscription': subscriptionID }, frame.body));
+                send(inConnection, messageID, subscriptionID, destination);
             });
         }
-
     });
 }
 
