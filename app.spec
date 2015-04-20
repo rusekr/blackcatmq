@@ -9,7 +9,6 @@ Group: Applications/System
 BuildRoot: %{abs_top_builddir}/rpm/BUILD
 Requires: nodejs
 Prefix: /opt
-BuildArch: noarch
 
 %define __jar_repack 0
 %description
