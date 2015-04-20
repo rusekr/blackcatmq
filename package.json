@@ -1,6 +1,6 @@
 {
-  "name": "blackcatmq",
-  "version": "0.0.7",
+  "name": "blackcatmq-ws",
+  "version": "0.8.0",
   "description": "simple STOMP messages broker (aka STOMP server) in node.js",
   "main": "blackcatmq.js",
   "directories": {
