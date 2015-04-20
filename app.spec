@@ -23,6 +23,7 @@ Simple STOMP messages broker (aka STOMP server) in node.js
 %install
 rm -rf $RPM_BUILD_ROOT%{prefix}/%{name}
 cd %{abs_top_builddir}/
+mkdir -p $RPM_BUILD_ROOT%{prefix}/%{name}
 rsync -a --exclude ".git" --exclude ".gitignore" --exclude "blackcatmq.service" %{abs_top_builddir}/ $RPM_BUILD_ROOT%{prefix}/%{name}
 cp -a  $RPM_BUILD_ROOT %{abs_top_builddir}/blackcatmq.service $RPM_BUILD_ROOT/usr/lib/systemd/system
 
