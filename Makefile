@@ -43,8 +43,7 @@ build_tools/global_start.mak :.
 	svn co -q $(SVN_SERVER)/$(BUILD_TOOLS_SVN_PATH)/tags/$(BUILD_TOOLS_SVN_TAG) $(BUILD_TOOLS_MODULE)
 
 build: 
-	npm install | tee -a $(LOGFILE)
-
+	npm install --no-optional | tee -a $(LOGFILE)
 
 clean:
 	git clean -dxf
