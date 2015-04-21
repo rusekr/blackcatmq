@@ -9,6 +9,7 @@ Group: Applications/System
 BuildRoot: %{abs_top_builddir}/rpm/BUILD
 Requires: nodejs
 Prefix: /opt
+BuildArch: x86_64
 
 %define __jar_repack 0
 %description

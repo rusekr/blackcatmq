@@ -1,5 +1,5 @@
 SVN_SERVER              := http://svn.teligent.ru/teligent/core
-BUILD_TOOLS_SVN_TAG	:= F_BUILD_2_0_17
+BUILD_TOOLS_SVN_TAG	:= F_BUILD_2_0_22
 SPEC_DEFAULTS_TAG	:= tags/0.1.4
 
 MODULE		:= blackcatmq
@@ -33,7 +33,7 @@ RPM_SPEC_FILE	:= $(BP)/app.spec
 # Specify file server, location on file server and packages to copy to file server
 # Used in scp target
 DIST_LOCATION	:= $(DIST_LOCATION_BASE)/products/$(PRODUCT)/$(MODULE)/$(DIST)/.
-PACKAGES        := $(wildcard $(BP)/rpm/RPMS/noarch/$(RPM_NAME)-*.rpm)
+PACKAGES        := $(wildcard $(BP)/rpm/RPMS/*/$(RPM_NAME)-*.rpm)
 REPORT_LOCATION := $(DIST_LOCATION_BASE)/products/$(PRODUCT)/$(MODULE)/.log/$(DIST)
 REPORT          := $(wildcard $(BP)/html/*)
 
