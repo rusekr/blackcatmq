@@ -6,7 +6,6 @@ MODULE		:= blackcatmq
 MODULE_LO	:= $(shell echo $(MODULE) | tr A-Z a-z)
 PRODUCT		:= osdp
 PRODUCT_UP	:= $(shell echo $(PRODUCT) | tr a-z A-Z)
-VERSION		:= $(shell git describe)
 
 ################################################################################
 # Only change the lines below if you want to change dependencies in the build
@@ -27,7 +26,7 @@ MAKE_MODULES := $(BP)/src
 
 # RPM file parameters used during do-package
 # Used in do-package target
-RPM_VERSION	:= $(VERSION)
+RPM_VERSION	:= $(shell git describe)
 RPM_RELEASE	:= 1
 RPM_SPEC_FILE	:= $(BP)/app.spec
 
