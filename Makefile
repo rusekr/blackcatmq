@@ -6,6 +6,7 @@ MODULE		:= blackcatmq
 MODULE_LO	:= $(shell echo $(MODULE) | tr A-Z a-z)
 PRODUCT		:= osdp
 PRODUCT_UP	:= $(shell echo $(PRODUCT) | tr a-z A-Z)
+VERSION		:= $(shell git describe)
 
 ################################################################################
 # Only change the lines below if you want to change dependencies in the build
