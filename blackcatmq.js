@@ -10,8 +10,6 @@
     6 February 2015 Sergey Krasnikov - Websocket server, ephemeral authorization support
 */
 
-var DEBUG = false;
-
 var util = require('util');
 var fs = require('fs');
 
@@ -35,11 +33,19 @@ function getId() {
 
 var BlackCatMQ = function (config) {
     var self = this;
+    
+    self.debug = config.debug;
+    self.log = function () {
+      if (!self.debug) {
+        return;
+      }
+      console.log.apply(console, Array.prototype.slice.call(arguments));
+    };
 
     self.identifier = 'BlackCatMQ-teligent';
 
     self.port = config.port || 8443;
-    self.host = [].concat(config.host || '0.0.0.0');
+    self.host = [].concat(config.host || false);
     self.interval = config.interval || 50000;
     self.serverType = config.serverType || 'https';
     self.authType = config.authType || 'none';
@@ -64,7 +70,7 @@ var BlackCatMQ = function (config) {
     }
 
     self.server = require(self.serverType).createServer(self.serverOptions, function(request, response) {
-        console.log((new Date()), 'got http request');
+        self.log((new Date()), 'got http request');
         var message = 'Websocket only.';
         response.writeHead(200, {
           'Content-Length': message.length,
@@ -73,13 +79,7 @@ var BlackCatMQ = function (config) {
         response.end(message);
     });
 
-    // Port binding
-    self.host.forEach(function (serverIP) {
-        self.server.listen(self.port, serverIP, function() {
-            console.log((new Date()) + "Server is listening on ip:", serverIP, 'and port:', self.port);
-        });
-    });
-          // Websocket server creation over http server
+    // Websocket server creation over http server
     self.wsServer = new (require('websocket').server)({
         httpServer: self.server,
         autoAcceptConnections: false
@@ -87,7 +87,7 @@ var BlackCatMQ = function (config) {
 
     // Web socket connection request from client handling
     self.wsServer.on('request', function(request) {
-        console.log((new Date()), 'got websocket request');
+        self.log((new Date()), 'got websocket request');
 
         var acceptedProtocols = [/*'v11.stomp',*/ 'v10.stomp']; //TODO: v11.stomp support - nack, heartbeat, subscriptions separate by id
         var requestedProtocols = request.requestedProtocols;
@@ -108,17 +108,17 @@ var BlackCatMQ = function (config) {
             throw new Error('not accepted protocol(s)');
         }
 
-        console.log((new Date()), 'accepted websocket request');
+        self.log((new Date()), 'accepted websocket request');
 
         var remoteAddress = connection.remoteAddress;
         util.log(util.format('client is connected from %s', remoteAddress));
 
         var data = '';
         connection.on('message', function(message) {
-            util.log(util.format('got message %s of type %s from %s', message.utf8Data, message.type, remoteAddress));
+            self.log(util.format('got message %s of type %s from %s', message.utf8Data, message.type, remoteAddress));
             if (message.type === 'utf8') {
                 var chunk = message.utf8Data;
-                if (DEBUG) {
+                if (self.debug == 'all') {
                     if (!self.dumpFileName) {
                         self.dumpFileName = new Date().toString() + '.dat';
                     }
@@ -134,9 +134,9 @@ var BlackCatMQ = function (config) {
                     frames.forEach(function(_frame) {
                         var frame = stomp.Frame(_frame);
                         try {
-                            if (DEBUG) {
-                                util.log(util.inspect(frame));
-                            }
+                            
+                            self.log(util.inspect(frame));
+                            
 
                             if (self[frame.command.toLowerCase()] && typeof self[frame.command.toLowerCase()] === 'function') {
                                 sender(connection, self[frame.command.toLowerCase()].call(self, connection, frame));
@@ -164,16 +164,30 @@ var BlackCatMQ = function (config) {
 BlackCatMQ.prototype.start = function(callback) {
     var self = this;
     
-    self.server.listen(self.port, self.host, function() {
-        var addr = self.server.address();
-        util.log(util.format("server is started on %s:%s ...", addr.address, addr.port));
-        
-        self.timerID = setInterval(function() { self.timer(); }, self.interval);
-        
-        if (callback && typeof callback === 'function') {
-            return callback();
+    // Port binding
+    var hostsCount = self.host.length;
+    var hostCurrent = 0;
+    self.host.forEach(function (serverIP) {
+        var startFunc = function () {
+            var addr = self.server.address();
+            util.log(util.format("server is started on %s:%s ...", addr.address, addr.port));
+            
+            hostCurrent++;
+            if (hostCurrent == hostsCount && !self.timerID) {
+              self.log(util.format("timer for queue started"));
+              self.timerID = setInterval(function() { self.timer(); }, self.interval);
+              
+              if (callback && typeof callback === 'function') {
+                  return callback();
+              }
+            }
+        };
+        if (serverIP) {
+            self.server.listen(self.port, serverIP, startFunc);
+        } else {
+            self.server.listen(self.port, startFunc);
         }
-    });    
+    });
 }
 
 /*
@@ -187,6 +201,7 @@ BlackCatMQ.prototype.stop = function(callback) {
             util.log('server is stopped');
 
             clearInterval(self.timerID);
+            self.timerID = false;
 
             if (callback && typeof callback === 'function') {
                 return callback();
@@ -233,7 +248,7 @@ BlackCatMQ.prototype.connect = function(connection, frame) {
             var expectedPassword = require('crypto').createHmac('sha1', self.auth.secret).update(login).digest('base64');
             var expireDate = login.split(':')[0];
 
-            console.log(expectedPassword, passcode, expireDate, nowDate, login, self.auth.secret);
+            self.log(expectedPassword, passcode, expireDate, nowDate, login, self.auth.secret);
 
             if(expectedPassword != passcode || parseInt(expireDate)*1000 < nowDate) {
                 return stomp.ServerFrame.ERROR('connect error','incorrect login or passcode');
@@ -563,15 +578,19 @@ if (require.main === module) {
         process.once('uncaughtException', function(err) {
             util.debug('error:' + err + err.stack);
             if (server) {
-                server.stop();
+                server.stop(function () {
+                    util.log('Got uncaughtException. Server stopped.');
+                });
             }
         });
         
         process.once('SIGINT', function() {
             if (server) {
-                server.stop();
+                server.stop(function () {
+                    util.log('Got SIGINT. Server stopped. Press Control-c to exit.');
+                });
             }
-            console.log('Got SIGINT.  Press Control-c to exit.');
+            
         });    
     });
 }
