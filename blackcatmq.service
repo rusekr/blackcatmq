@@ -1,0 +1,13 @@
+[Unit]
+Description=WebSocket to xmpp proxy at node.js
+Requires=network.target
+After=network.target
+ 
+[Service]
+Type=simple
+WorkingDirectory=/opt/blackcatmq/
+ExecStart=/usr/bin/node ./blackcatmq.js
+Restart=on-failure
+ 
+[Install]
+WantedBy=multi-user.target
