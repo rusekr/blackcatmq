@@ -105,7 +105,7 @@ var BlackCatMQ = function (config) {
             var connection = request.accept(selectedProtocol, request.origin);
         } else {
             request.reject(404 /*?*/, 'not accepted protocol(s)');
-            throw new Error('not accepted protocol(s)');
+            return;
         }
 
         self.log((new Date()), 'accepted websocket request');
