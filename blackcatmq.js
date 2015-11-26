@@ -45,7 +45,7 @@ var BlackCatMQ = function (config) {
     self.identifier = 'BlackCatMQ-teligent';
 
     self.port = config.port || 8443;
-    self.host = [].concat(config.host || false);
+    self.host = config.host || false;
     self.interval = config.interval || 50000;
     self.serverType = config.serverType || 'https';
     self.authType = config.authType || 'none';
@@ -54,6 +54,8 @@ var BlackCatMQ = function (config) {
     self.serverOptions.cert = self.serverType === 'https' ? fs.readFileSync(self.serverOptions.cert) : '';
 
     self.connections = {};
+
+    self.servers = [];
 
     self.messages = { frame: {}, queue: [] };
 
@@ -69,148 +71,178 @@ var BlackCatMQ = function (config) {
             break;
     }
 
-    self.server = require(self.serverType).createServer(self.serverOptions, function(request, response) {
-        self.log((new Date()), 'got http request');
-        var message = 'Websocket only.';
-        response.writeHead(200, {
-          'Content-Length': message.length,
-          'Content-Type': 'text/plain'
+    self.createServer = function() {
+        var server = require(self.serverType).createServer(self.serverOptions, function(request, response) {
+            self.log((new Date()), 'got http request');
+            var message = 'Websocket only.';
+            response.writeHead(200, {
+              'Content-Length': message.length,
+              'Content-Type': 'text/plain'
+            });
+            response.end(message);
         });
-        response.end(message);
-    });
 
-    // Websocket server creation over http server
-    self.wsServer = new (require('websocket').server)({
-        httpServer: self.server,
-        autoAcceptConnections: false
-    });
+        // Websocket server creation over http server
+        var wsServer = new (require('websocket').server)({
+            httpServer: server,
+            autoAcceptConnections: false
+        });
 
-    // Web socket connection request from client handling
-    self.wsServer.on('request', function(request) {
-        self.log((new Date()), 'got websocket request');
+        // Web socket connection request from client handling
+        wsServer.on('request', function(request) {
+            self.log((new Date()), 'got websocket request');
 
-        var acceptedProtocols = [/*'v11.stomp',*/ 'v10.stomp']; //TODO: v11.stomp support - nack, heartbeat, subscriptions separate by id
-        var requestedProtocols = request.requestedProtocols;
-        var selectedProtocol = null;
-        if (requestedProtocols.length) {
-            requestedProtocols.forEach(function (protocol) {
-                if (acceptedProtocols.indexOf(protocol) !== -1) {
-                    selectedProtocol = protocol;
-                    return;
+            var connection;
+            var acceptedProtocols = [/*'v11.stomp',*/ 'v10.stomp']; //TODO: v11.stomp support - nack, heartbeat, subscriptions separate by id
+            var requestedProtocols = request.requestedProtocols;
+            var selectedProtocol = null;
+            if (requestedProtocols.length) {
+                requestedProtocols.forEach(function (protocol) {
+                    if (acceptedProtocols.indexOf(protocol) !== -1) {
+                        selectedProtocol = protocol;
+                        return;
+                    }
+                });
+            }
+
+            if (selectedProtocol !== null) {
+                connection = request.accept(selectedProtocol, request.origin);
+            } else {
+                request.reject(404 /*?*/, 'not accepted protocol(s)');
+                return;
+            }
+
+            self.log((new Date()), 'accepted websocket request');
+
+            var remoteAddress = connection.remoteAddress;
+            util.log(util.format('client is connected from %s', remoteAddress));
+
+            var data = '';
+            connection.on('message', function(message) {
+                self.log(util.format('got message %s of type %s from %s', message.utf8Data, message.type, remoteAddress));
+                if (message.type === 'utf8') {
+                    var chunk = message.utf8Data;
+                    if (self.debug == 'all') {
+                        if (!self.dumpFileName) {
+                            self.dumpFileName = new Date().toString() + '.dat';
+                        }
+                        fs.appendFileSync('./dump/' + self.dumpFileName, chunk, encoding='utf8');
+                    }
+
+                    data += chunk;
+
+                    var frames = data.split(stomp.DELIMETER);
+
+                    if (frames.length > 1) {
+                        data = frames.pop();
+                        frames.forEach(function(_frame) {
+                            var frame = stomp.Frame(_frame);
+                            try {
+
+                                self.log(util.inspect(frame));
+
+
+                                if (self[frame.command.toLowerCase()] && typeof self[frame.command.toLowerCase()] === 'function') {
+                                    sender(connection, self[frame.command.toLowerCase()].call(self, connection, frame));
+                                } else {
+                                    sender(connection, stomp.ServerFrame.ERROR('invalid parameters','command ' + frame.command + ' is not supported'));
+                                }
+                            } catch (ex) {
+                                sender(connection, stomp.ServerFrame.ERROR(ex, ex.stack));
+                            }
+                        });
+                    }
                 }
             });
-        }
 
-        if (selectedProtocol !== null) {
-            var connection = request.accept(selectedProtocol, request.origin);
-        } else {
-            request.reject(404 /*?*/, 'not accepted protocol(s)');
-            return;
-        }
-
-        self.log((new Date()), 'accepted websocket request');
-
-        var remoteAddress = connection.remoteAddress;
-        util.log(util.format('client is connected from %s', remoteAddress));
-
-        var data = '';
-        connection.on('message', function(message) {
-            self.log(util.format('got message %s of type %s from %s', message.utf8Data, message.type, remoteAddress));
-            if (message.type === 'utf8') {
-                var chunk = message.utf8Data;
-                if (self.debug == 'all') {
-                    if (!self.dumpFileName) {
-                        self.dumpFileName = new Date().toString() + '.dat';
-                    }
-                    fs.appendFileSync('./dump/' + self.dumpFileName, chunk, encoding='utf8');
-                }
-
-                data += chunk;
-
-                var frames = data.split(stomp.DELIMETER);
-
-                if (frames.length > 1) {
-                    data = frames.pop();
-                    frames.forEach(function(_frame) {
-                        var frame = stomp.Frame(_frame);
-                        try {
-                            
-                            self.log(util.inspect(frame));
-                            
-
-                            if (self[frame.command.toLowerCase()] && typeof self[frame.command.toLowerCase()] === 'function') {
-                                sender(connection, self[frame.command.toLowerCase()].call(self, connection, frame));
-                            } else {
-                                sender(connection, stomp.ServerFrame.ERROR('invalid parameters','command ' + frame.command + ' is not supported'));
-                            }
-                        } catch (ex) {
-                            sender(connection, stomp.ServerFrame.ERROR(ex, ex.stack));
-                        }
-                    });
-                }
-            }
+            connection.on('close', function() {
+                util.log(util.format('client is disconnected from %s', remoteAddress));
+                self.disconnect(connection, null);
+            });
         });
-
-        connection.on('close', function() {
-            util.log(util.format('client is disconnected from %s', remoteAddress));
-            self.disconnect(connection, null);
-        });
-    });
-}
+        return server;
+    };
+};
 
 /*
  start server
 */
 BlackCatMQ.prototype.start = function(callback) {
     var self = this;
-    
-    // Port binding
-    var hostsCount = self.host.length;
+    var server = null;
+    var hostsCount = 1;
     var hostCurrent = 0;
-    self.host.forEach(function (serverIP) {
-        var startFunc = function () {
-            var addr = self.server.address();
-            util.log(util.format("server is started on %s:%s ...", addr.address, addr.port));
-            
-            hostCurrent++;
-            if (hostCurrent == hostsCount && !self.timerID) {
-              self.log(util.format("timer for queue started"));
-              self.timerID = setInterval(function() { self.timer(); }, self.interval);
-              
-              if (callback && typeof callback === 'function') {
-                  return callback();
-              }
+    var startFunc = function () {
+        hostCurrent++;
+        if (hostCurrent == hostsCount && !self.timerID) {
+
+            self.timerID = setInterval(function() { self.timer(); }, self.interval);
+            self.log(util.format("timer for queue started"));
+
+            self.servers.forEach(function (server) {
+                var addr = server.address();
+                self.log(addr);
+                util.log(util.format("server is started on %s:%s ...", addr.address, addr.port));
+            });
+            util.log('all servers started');
+
+            if (callback && typeof callback === 'function') {
+                return callback();
             }
-        };
-        if (serverIP) {
-            self.server.listen(self.port, serverIP, startFunc);
-        } else {
-            self.server.listen(self.port, startFunc);
         }
-    });
-}
+    };
+    // Port binding
+    if (!self.host) {
+        self.log('binding server to all ips with port', self.port);
+        server = self.createServer();
+        self.servers.push(server);
+        server.listen(self.port, startFunc);
+    } else {
+        self.host = [].concat(self.host);
+        hostsCount = self.host.length;
+        self.host.forEach(function (serverIP) {
+          var matches = serverIP.match(/^([^:]+)\:([^:]*)$/) || [];
+          var host  = matches[1] || serverIP;
+          var port = matches[2] || self.port;
+            if (port) {}
+            self.log('binding server to ip with port', host, port);
+            server = self.createServer();
+            self.servers.push(server);
+            server.listen(port, host, startFunc);
+        });
+    }
+    
+
+};
 
 /*
  stop server
 */
 BlackCatMQ.prototype.stop = function(callback) {
     var self = this;
-    
-    if (self.server._handle) {
-        self.server.close(function() {
-            util.log('server is stopped');
+    var serversCount = self.servers.length;
+    var serversStopped = 0;
+    self.servers.forEach(function (server) {
+        if (server._handle) {
+            var addr = server.address();
+            server.close(function() {
+                util.log('server on ', addr, 'is stopped');
+                serversStopped++;
+                if (serversStopped == serversCount) {
+                    clearInterval(self.timerID);
+                    self.timerID = false;
 
-            clearInterval(self.timerID);
-            self.timerID = false;
-
-            if (callback && typeof callback === 'function') {
-                return callback();
-            }
-        });
-    } else {
-        util.log('server is already stopped');
-    }
-}
+                    self.servers.splice(0, self.servers.length);
+                    if (callback && typeof callback === 'function') {
+                        return callback();
+                    }
+                }
+            });
+        } else {
+            util.log('server is already stopped');
+        }
+    });
+};
 
 /*
  STOMP command  -> connect
@@ -225,11 +257,11 @@ BlackCatMQ.prototype.connect = function(connection, frame) {
 
     if (self.auth) {
         
-        var login = frame.header['login'];
+        var login = frame.header.login;
         if (!login) {
             return stomp.ServerFrame.ERROR('connect error','login is required');    
         }
-        var passcode = frame.header['passcode']
+        var passcode = frame.header.passcode;
         if (!passcode) {
             return stomp.ServerFrame.ERROR('connect error','passcode is required');    
         }
@@ -261,7 +293,7 @@ BlackCatMQ.prototype.connect = function(connection, frame) {
 
     self.connections[sessionID] = connection;
     return stomp.ServerFrame.CONNECTED(sessionID, self.identifier);
-}
+};
 
 /*
  STOMP command  -> stomp
@@ -286,12 +318,12 @@ BlackCatMQ.prototype.subscribe = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
     
-    var destination = frame.header['destination'];
+    var destination = frame.header.destination;
     if (!destination) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no destination argument');
     }
 
-    var id = frame.header['id'];
+    var id = frame.header.id;
     // v1.1 id is required
     if (!id) {
         id = 'destination';
@@ -304,10 +336,10 @@ BlackCatMQ.prototype.subscribe = function(connection, frame) {
     connection.subscriptions[destination].push(id);
 
     // TODO: v1.1 client-individual ack type
-    if (frame.header['ack'] && frame.header['ack'] === 'client') {
+    if (frame.header.ack && frame.header.ack === 'client') {
         connection.ack_list.push(id);
     }
-}
+};
 
 /*
  STOMP command -> unsubsctibe
@@ -327,8 +359,8 @@ BlackCatMQ.prototype.unsubscribe = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
 
-    var id = frame.header['id'];
-    var destination = frame.header['destination'];
+    var id = frame.header.id;
+    var destination = frame.header.destination;
     if (!id && !destination) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no id or destination argument');
     }
@@ -350,7 +382,7 @@ BlackCatMQ.prototype.unsubscribe = function(connection, frame) {
             }
         });
     }
-}
+};
 
 /*
  STOMP command -> send
@@ -370,12 +402,12 @@ BlackCatMQ.prototype.send = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
     
-    var destination = frame.header['destination'];
+    var destination = frame.header.destination;
     if (!destination) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no destination argument');
     }
     
-    var transaction = frame.header['transaction'];
+    var transaction = frame.header.transaction;
     if (transaction) {
         self.transactions[transaction].push(frame);
     }
@@ -387,7 +419,7 @@ BlackCatMQ.prototype.send = function(connection, frame) {
         }
 
         sender(inConnection, stomp.ServerFrame.MESSAGE(destination, headers, frame.body));
-    }
+    };
 
     Object.keys(self.connections).forEach(function (sessionID) {
 
@@ -414,7 +446,7 @@ BlackCatMQ.prototype.send = function(connection, frame) {
             });
         }
     });
-}
+};
 
 /*
  STOMP command -> ack
@@ -446,7 +478,7 @@ BlackCatMQ.prototype.ack = function(connection, frame) {
     }
     
     return stomp.ServerFrame.RECEIPT(messageID);
-}
+};
 
 
 /*
@@ -464,7 +496,7 @@ BlackCatMQ.prototype.disconnect = function(connection, frame) {
     }
     
     delete self.connections[connection.sessionID];
-}
+};
 
 /*
  STOMP command -> begin
@@ -484,13 +516,13 @@ BlackCatMQ.prototype.begin = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
     
-    var transaction = frame.header['transaction'];
+    var transaction = frame.header.transaction;
     if (!transaction) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no transaction argument');
     }
     
     self.transactions[transaction] = [];
-}
+};
 
 /*
  STOMP command -> commit
@@ -510,13 +542,13 @@ BlackCatMQ.prototype.commit = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
 
-    var transaction = frame.header['transaction'];
+    var transaction = frame.header.transaction;
     if (!transaction) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no transaction argument');
     }
     
     delete self.transactions[transaction];
-}
+};
 
 /*
  STOMP command -> abort
@@ -536,7 +568,7 @@ BlackCatMQ.prototype.abort = function(connection, frame) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no header section');
     }
     
-    var transaction = frame.header['transaction'];
+    var transaction = frame.header.transaction;
     if (!transaction) {
         return stomp.ServerFrame.ERROR('invalid parameters','there is no transaction argument');
     }
@@ -545,7 +577,7 @@ BlackCatMQ.prototype.abort = function(connection, frame) {
         self.send(null, frame);
     });    
     delete self.transactions[transaction];
-}
+};
 
 
 /*
@@ -559,7 +591,7 @@ BlackCatMQ.prototype.timer = function() {
         self.send(null, self.messages.frame[messageID]);
         delete self.messages.frame[messageID];
     }
-}
+};
 
 if (require.main === module) {
     /*
@@ -576,10 +608,11 @@ if (require.main === module) {
         }
         
         process.once('uncaughtException', function(err) {
-            util.debug('error:' + err + err.stack);
+            console.error('error:' + err + err.stack);
             if (server) {
                 server.stop(function () {
                     util.log('Got uncaughtException. Server stopped.');
+                    server = false;
                 });
             }
         });
@@ -587,7 +620,8 @@ if (require.main === module) {
         process.once('SIGINT', function() {
             if (server) {
                 server.stop(function () {
-                    util.log('Got SIGINT. Server stopped. Press Control-c to exit.');
+                    util.log('Got SIGINT. Server stopped.');
+                    server = false;
                 });
             }
             
@@ -601,4 +635,4 @@ function create(config){
 
 module.exports = {
     create: create
-}
+};
